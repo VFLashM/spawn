@@ -5,7 +5,7 @@ import subprocess
 IGNORE = -1
 CAPTURE = -2
 INTERACT = -3
-MERGE = -4
+PIPE = -4
 STDIN = -5
 STDOUT = -6
 STDERR = -7
@@ -92,18 +92,19 @@ class Runnable(object):
 
 class Process(Runnable):
     def __init__(self, cmd, *args,
-                 stdin=_UNDEFINED, stdout=STDOUT, stderr=STDERR,
+                 stdin=_UNDEFINED, stdout=_UNDEFINED, stderr=_UNDEFINED,
                  **kwargs):
         self._cmd = cmd
         self._args = args
         self._cmdline = cmdline(cmd, *args)
 
-        assert stdin in (None, _UNDEFINED, STDIN, INTERACT) or hasattr(stdin, 'fileno')
+        assert stdin in (_UNDEFINED, STDIN, INTERACT) or hasattr(stdin, 'fileno')
         self._stdin = stdin
-        assert stdout not in (STDIN, _UNDEFINED)
+        assert stdout not in (STDIN, None)
         self._stdout = stdout
-        assert stderr not in (STDIN, _UNDEFINED)
+        assert stderr not in (STDIN, None)
         self._stderr = stderr
+        assert not (stdout == PIPE and stderr == PIPE)
         self._kwargs = kwargs
         
         self._popen = None
@@ -128,6 +129,9 @@ class Process(Runnable):
 
     def _prepare_pipe(self):
         self._init_pipe = True
+        if self._stdout != PIPE and self._stderr != PIPE:
+            assert self._stdout == _UNDEFINED
+            self._stdout = PIPE
 
     def _parallel(self, fn, *args, **kwargs):
         thread = threading.Thread(target=fn, name='spawn_aux', args=args, kwargs=kwargs)
@@ -136,21 +140,18 @@ class Process(Runnable):
         self._threads.append(thread)
 
     @staticmethod
-    def _out_handle(value, other, is_pipe):
+    def _out_handle(value, default, is_pipe):
         if value == IGNORE:
             return subprocess.DEVNULL
-        elif value == CAPTURE:
+        elif value in (CAPTURE, INTERACT):
             return subprocess.PIPE
-        elif value == INTERACT:
+        elif value == PIPE:
+            assert is_pipe
             return subprocess.PIPE
-        elif value == MERGE:
-            assert other
-            return other
+        elif value == _UNDEFINED:
+            return default
         elif value == STDOUT:
-            if is_pipe:
-                return subprocess.PIPE
-            else:
-                return sys.stdout
+            return sys.stdout
         elif value == STDERR:
             return sys.stderr
         else:
@@ -171,12 +172,8 @@ class Process(Runnable):
             assert hasattr(self._stdin, 'fileno'), self._stdin
             pstdin = self._stdin
 
-        if self._stdout != MERGE:
-            pstdout = Process._out_handle(self._stdout, None, self._init_pipe)
-            pstderr = Process._out_handle(self._stderr, pstdout, self._init_pipe)
-        else:
-            pstderr = Process._out_handle(self._stderr, None, self._init_pipe)
-            pstdout = Process._out_handle(self._stdout, pstderr, self._init_pipe)
+        pstdout = Process._out_handle(self._stdout, sys.stdout, self._init_pipe)
+        pstderr = Process._out_handle(self._stderr, sys.stderr, self._init_pipe)
 
         self._popen = subprocess.Popen(self._cmdline,
                                        stdin=pstdin, stdout=pstdout, stderr=pstderr,
@@ -188,12 +185,10 @@ class Process(Runnable):
         elif self._stderr == INTERACT:
             self._output = self._popen.stderr
         if self._init_pipe:
-            if self._stdout == STDOUT:
+            if self._stdout == PIPE:
                 self._pipe = self._popen.stdout
-            elif self._stderr == STDOUT:
+            elif self._stderr == PIPE:
                 self._pipe = self._popen.stderr
-            else:
-                assert False, 'no stdout'
 
         if input is not None:
             self._parallel(self._popen.stdin.write, input)
@@ -225,7 +220,7 @@ class Process(Runnable):
 class Pipe(Runnable):
     def __init__(self, cmd, *args,
                  _preceding=None,
-                 stdin=_UNDEFINED, stdout=STDOUT, stderr=STDERR,
+                 stdin=_UNDEFINED, stdout=_UNDEFINED, stderr=_UNDEFINED,
                  **kwargs):
         if not _preceding:
             assert '|' in cmd, 'not a pipe'
@@ -239,7 +234,7 @@ class Pipe(Runnable):
                 PrecedingType = Process
             _preceding = PrecedingType(preceding_cmd, *preceding_args,
                                        stdin=stdin,
-                                       stdout=STDOUT,
+                                       stdout=_UNDEFINED,
                                        stderr=stderr,
                                        **kwargs)
             _preceding._prepare_pipe()
